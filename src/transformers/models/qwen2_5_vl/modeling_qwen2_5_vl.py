@@ -1204,6 +1204,7 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
             attentions=all_self_attns,
         )
 
+
     def _update_causal_mask(
         self,
         attention_mask: torch.Tensor,
