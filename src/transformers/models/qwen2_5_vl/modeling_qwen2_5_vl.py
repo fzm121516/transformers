@@ -319,16 +319,44 @@ QWEN2_5_VL_VISION_ATTENTION_CLASSES = {
 }
 
 
-class Qwen2_5_VLVisionBlock(nn.Module):
-    def __init__(self, config, attn_implementation: str = "sdpa") -> None:
+
+
+class FourierAdapter(nn.Module):
+    def __init__(self, input_dim, bottleneck_dim=8):
         super().__init__()
+        self.down = nn.Linear(input_dim, bottleneck_dim)
+        self.up = nn.Linear(bottleneck_dim, input_dim)
+        
+        # 初始化升维层权重为零
+        nn.init.zeros_(self.up.weight)
+        nn.init.zeros_(self.up.bias)
+
+    def forward(self, x):
+        # 直接进行维度压缩和重建
+        x = self.down(x)
+        x = self.up(x)
+        return x
+
+
+
+
+class Qwen2_5_VLVisionBlock(nn.Module):
+    def __init__(self, config, attn_implementation: str = "sdpa", layer_idx: int = -1) -> None:
+        super().__init__()
+        self.layer_idx = layer_idx  # 保存层序号
         self.norm1 = Qwen2RMSNorm(config.hidden_size, eps=1e-6)
         self.norm2 = Qwen2RMSNorm(config.hidden_size, eps=1e-6)
         self.attn = QWEN2_5_VL_VISION_ATTENTION_CLASSES[attn_implementation](
             config.hidden_size, num_heads=config.num_heads
         )
         self.mlp = Qwen2_5_VLMLP(config, bias=True)
-
+        
+        config.freq_layers = [15,31] 
+        self.freq_module = (
+                    FourierAdapter(config.hidden_size)
+                    if layer_idx in config.freq_layers else None
+                )
+        
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -343,6 +371,8 @@ class Qwen2_5_VLVisionBlock(nn.Module):
             position_embeddings=position_embeddings,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
+        if self.freq_module is not None:
+            hidden_states = hidden_states + self.freq_module(hidden_states)
         return hidden_states
 
 
@@ -412,9 +442,14 @@ class Qwen2_5_VisionTransformerPretrainedModel(Qwen2_5_VLPreTrainedModel):
         head_dim = config.hidden_size // config.num_heads
         self.rotary_pos_emb = Qwen2_5_VisionRotaryEmbedding(head_dim // 2)
 
+        # self.blocks = nn.ModuleList(
+        #     [Qwen2_5_VLVisionBlock(config, config._attn_implementation) for _ in range(config.depth)]
+        # )
         self.blocks = nn.ModuleList(
-            [Qwen2_5_VLVisionBlock(config, config._attn_implementation) for _ in range(config.depth)]
+            [Qwen2_5_VLVisionBlock(config, config._attn_implementation, layer_idx=i) for i in range(config.depth)]
         )
+
+
         self.merger = Qwen2_5_VLPatchMerger(
             dim=config.out_hidden_size,
             context_dim=config.hidden_size,
@@ -975,21 +1010,6 @@ QWEN2_5_VL_ATTENTION_CLASSES = {
 }
 
 
-class FourierAdapter(nn.Module):
-    def __init__(self, dim, bottleneck_dim=8):
-        super().__init__()
-        assert bottleneck_dim <= dim, "bottleneck_dim must be <= input dim"
-        self.down = nn.Linear(dim, bottleneck_dim)
-        self.up = nn.Linear(bottleneck_dim, dim)
-
-    def forward(self, x):
-        x_fft = torch.fft.rfft(x, dim=1)
-        x_freq = self.down(x_fft.real)  # 只处理实部
-        x_freq = self.up(x_freq)
-        x_ifft = torch.fft.irfft(x_freq, n=x.size(1), dim=1)
-        return x_ifft
-
-
 
 class Qwen2_5_VLDecoderLayer(nn.Module):
     def __init__(self, config: Qwen2_5_VLConfig, layer_idx: int):
@@ -1006,11 +1026,7 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
         self.mlp = Qwen2MLP(config)
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        config.freq_layers = [15,31] 
-        self.freq_module = (
-                    FourierAdapter(config.hidden_size)
-                    if layer_idx in config.freq_layers else None
-                )
+
 
     def forward(
         self,
@@ -1069,8 +1085,7 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
 
-        if self.freq_module is not None:
-                    hidden_states = hidden_states + self.freq_module(hidden_states)
+
 
 
         outputs = (hidden_states,)
