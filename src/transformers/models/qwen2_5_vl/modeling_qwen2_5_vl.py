@@ -975,6 +975,22 @@ QWEN2_5_VL_ATTENTION_CLASSES = {
 }
 
 
+class FourierAdapter(nn.Module):
+    def __init__(self, dim, bottleneck_dim=8):
+        super().__init__()
+        assert bottleneck_dim <= dim, "bottleneck_dim must be <= input dim"
+        self.down = nn.Linear(dim, bottleneck_dim)
+        self.up = nn.Linear(bottleneck_dim, dim)
+
+    def forward(self, x):
+        x_fft = torch.fft.rfft(x, dim=1)
+        x_freq = self.down(x_fft.real)  # 只处理实部
+        x_freq = self.up(x_freq)
+        x_ifft = torch.fft.irfft(x_freq, n=x.size(1), dim=1)
+        return x_ifft
+
+
+
 class Qwen2_5_VLDecoderLayer(nn.Module):
     def __init__(self, config: Qwen2_5_VLConfig, layer_idx: int):
         super().__init__()
@@ -990,6 +1006,11 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
         self.mlp = Qwen2MLP(config)
         self.input_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        config.freq_layers = [15,31] 
+        self.freq_module = (
+                    FourierAdapter(config.hidden_size)
+                    if layer_idx in config.freq_layers else None
+                )
 
     def forward(
         self,
@@ -1047,6 +1068,10 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
+
+        if self.freq_module is not None:
+                    hidden_states = hidden_states + self.freq_module(hidden_states)
+
 
         outputs = (hidden_states,)
 
