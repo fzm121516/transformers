@@ -433,7 +433,7 @@ class Qwen2VLVisionBlock(nn.Module):
 
         config.freq_layers = [7,15,23,31] 
         self.freq_module = (
-                    FourierAdapter(config.hidden_size)
+                    FourierAdapter(config.embed_dim)
                     if layer_idx in config.freq_layers else None
                 )
 
