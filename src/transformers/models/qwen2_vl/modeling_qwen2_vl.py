@@ -401,10 +401,26 @@ QWEN2_VL_VISION_ATTENTION_CLASSES = {
     "sdpa": VisionSdpaAttention,
 }
 
+class FourierAdapter(nn.Module):
+    def __init__(self, input_dim, bottleneck_dim=8):
+        super().__init__()
+        self.down = nn.Linear(input_dim, bottleneck_dim)
+        self.up = nn.Linear(bottleneck_dim, input_dim)
+        
+        # 初始化升维层权重为零
+        nn.init.zeros_(self.up.weight)
+        nn.init.zeros_(self.up.bias)
+
+    def forward(self, x):
+        # 直接进行维度压缩和重建
+        x = self.down(x)
+        x = self.up(x)
+        return x
 
 class Qwen2VLVisionBlock(nn.Module):
-    def __init__(self, config, attn_implementation: str = "sdpa") -> None:
+    def __init__(self, config, attn_implementation: str = "sdpa", layer_idx: int = -1) -> None:
         super().__init__()
+        self.layer_idx = layer_idx  # 保存层序号
         self.norm1 = LayerNorm(config.embed_dim, eps=1e-6)
         self.norm2 = LayerNorm(config.embed_dim, eps=1e-6)
         mlp_hidden_dim = int(config.embed_dim * config.mlp_ratio)
@@ -413,6 +429,13 @@ class Qwen2VLVisionBlock(nn.Module):
             config.embed_dim, num_heads=config.num_heads
         )
         self.mlp = VisionMlp(dim=config.embed_dim, hidden_dim=mlp_hidden_dim, hidden_act=config.hidden_act)
+
+
+        config.freq_layers = [7,15,23,31] 
+        self.freq_module = (
+                    FourierAdapter(config.hidden_size)
+                    if layer_idx in config.freq_layers else None
+                )
 
     def forward(
         self,
@@ -428,6 +451,8 @@ class Qwen2VLVisionBlock(nn.Module):
             position_embeddings=position_embeddings,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
+        if self.freq_module is not None:
+            hidden_states = hidden_states + self.freq_module(hidden_states)
         return hidden_states
 
 
@@ -942,9 +967,14 @@ class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel):
         head_dim = config.embed_dim // config.num_heads
         self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
 
+
+        # self.blocks = nn.ModuleList(
+        #     [Qwen2VLVisionBlock(config, config._attn_implementation) for _ in range(config.depth)]
+        # )
         self.blocks = nn.ModuleList(
-            [Qwen2VLVisionBlock(config, config._attn_implementation) for _ in range(config.depth)]
+            [Qwen2VLVisionBlock(config, config._attn_implementation, layer_idx=i) for i in range(config.depth)]
         )
+
         self.merger = PatchMerger(
             dim=config.hidden_size, context_dim=config.embed_dim, spatial_merge_size=config.spatial_merge_size
         )
