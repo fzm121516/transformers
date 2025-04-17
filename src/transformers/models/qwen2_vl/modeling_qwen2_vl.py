@@ -401,78 +401,32 @@ QWEN2_VL_VISION_ATTENTION_CLASSES = {
     "sdpa": VisionSdpaAttention,
 }
 
+
+
 class SAA(nn.Module):
     def __init__(self, input_dim, bottleneck_dim=8, kernel_size=3):
         super().__init__()
-        
-        # 下采样层和上采样层
         self.down = nn.Linear(input_dim, bottleneck_dim)
         self.up = nn.Linear(bottleneck_dim, input_dim)
-        
-        # 初始化升维层权重为零
-        nn.init.zeros_(self.up.weight)
-        nn.init.zeros_(self.up.bias)
 
-        # 卷积层，用于提取时空特征
-        self.conv1d = nn.Conv1d(in_channels=bottleneck_dim, out_channels=bottleneck_dim, kernel_size=kernel_size, padding=kernel_size//2)
-
-        # 自注意力机制（用于时空关系建模）
-        self.attention = nn.MultiheadAttention(embed_dim=bottleneck_dim, num_heads=4, batch_first=True)
+        # LayerNorm（增加 eps 防止除零）
+        self.norm1 = nn.LayerNorm(input_dim, eps=1e-6)
 
     def forward(self, x):
-        # x 的形状：B = 1, N = 时间步长, D = 特征维度
-        batch_size, seq_len, input_dim = x.shape
-        
-        # 1. 下采样（压缩维度）
-        x = self.down(x)  # B, N, bottleneck_dim
-        
-        # 2. 卷积层（提取时空特征）
-        x = x.permute(0, 2, 1)  # 改变维度顺序，以适应 Conv1d (B, C, N)
-        x = self.conv1d(x)  # B, bottleneck_dim, N
-        x = x.permute(0, 2, 1)  # 恢复为 (B, N, bottleneck_dim)
-        
-        # 3. 自注意力机制
-        x_attention, _ = self.attention(x, x, x)  # 自注意力机制处理时间步之间的依赖关系
+        # x: [N, D]
 
-        # 4. 上采样（恢复原始维度）
-        x = self.up(x_attention)  # B, N, input_dim
-        
+        x = self.down(x)  # [N, bottleneck_dim]
+        x = self.up(x)  # [N, input_dim]
+
+
         return x
 
 
-class VAP(nn.Module):
-    def __init__(self, vit_dim, num_query_tokens, num_heads=8):
-        super().__init__()
-        self.query_tokens = nn.Parameter(torch.randn(1, num_query_tokens, vit_dim))
-        self.attn = nn.MultiheadAttention(embed_dim=vit_dim, num_heads=num_heads, batch_first=True)
-
-    def forward(self, x):
-        # x: [B, N, D]
-        B = x.size(0)
-        queries = self.query_tokens.expand(B, -1, -1)  # [B, M, D]
-        out, _ = self.attn(queries, x, x)  # cross-attention
-        return out  # [B, M, D]
-
-def pad_rotary_embedding(rotary_emb: torch.Tensor, num_extra_tokens: int) -> torch.Tensor:
-        # rotary_emb: [seq_len, dim] or [1, seq_len, dim]
-        # 在末尾补 num_extra_tokens 个零向量
-        pad_shape = list(rotary_emb.shape)
-        pad_shape[-2] = num_extra_tokens  # 位置维度通常是倒数第二个
-        pad = torch.zeros(*pad_shape, device=rotary_emb.device, dtype=rotary_emb.dtype)
-        return torch.cat([rotary_emb, pad], dim=-2)
-
-def pad_pos_embedding(pos: torch.Tensor, num_extra_tokens: int) -> torch.Tensor:
-        # pos: [B, T, D] or [T, D] —> 在末尾补 zero embeddings
-        pad_shape = list(pos.shape)
-        pad_shape[-2] = num_extra_tokens
-        pad = torch.zeros(*pad_shape, device=pos.device, dtype=pos.dtype)
-        return torch.cat([pos, pad], dim=-2)
 
 
 class Qwen2VLVisionBlock(nn.Module):
     def __init__(self, config, attn_implementation: str = "sdpa", layer_idx: int = -1) -> None:
         super().__init__()
-        self.layer_idx = layer_idx  # 保存层序号
         self.norm1 = LayerNorm(config.embed_dim, eps=1e-6)
         self.norm2 = LayerNorm(config.embed_dim, eps=1e-6)
         mlp_hidden_dim = int(config.embed_dim * config.mlp_ratio)
@@ -482,31 +436,12 @@ class Qwen2VLVisionBlock(nn.Module):
         )
         self.mlp = VisionMlp(dim=config.embed_dim, hidden_dim=mlp_hidden_dim, hidden_act=config.hidden_act)
 
-
-        # config.SAA_layers = [] 
-
-        config.SAA_layers = [7,15,23,31] 
+        self.SAA_layers = [31] 
+        # self.SAA_layers = [7,15,23,31] 
         self.SAA = (
                     SAA(config.embed_dim)
-                    if layer_idx in config.SAA_layers else None
+                    if layer_idx in self.SAA_layers else None
                 )
-        
-        config.VAP_layers = [0] 
-        config.VAP_heads=4
-        self.T_vap=32
-        self.vap_remove_layer=31
-
-        self.VAP = (
-            VAP(
-                vit_dim=config.embed_dim,
-                num_query_tokens=self.T_vap,
-                num_heads=config.VAP_heads,
-            )
-            if layer_idx in config.VAP_layers else None
-        )
-
-        self.vap_remove_layer=31
-
 
     def forward(
         self,
@@ -515,41 +450,20 @@ class Qwen2VLVisionBlock(nn.Module):
         rotary_pos_emb: Optional[torch.Tensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
-        
-        if self.VAP is not None:
-            vap_tokens = self.VAP(hidden_states)  # [B, T_vap, D]
-            hidden_states = torch.cat([hidden_states, vap_tokens], dim=1)
-
-
-        if rotary_pos_emb is not None and self.T_vap > 0:
-            rotary_pos_emb = pad_rotary_embedding(rotary_pos_emb, self.T_vap)
-
-        if position_embeddings is not None and self.T_vap > 0:
-            pos1, pos2 = position_embeddings
-            position_embeddings = (
-                pad_pos_embedding(pos1, self.T_vap),
-                pad_pos_embedding(pos2, self.T_vap),
-            )
-
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
             position_embeddings=position_embeddings,
         )
-
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
 
         if self.SAA is not None:
-            hidden_states = hidden_states + self.SAA(hidden_states)
-
-         # === 最后一层时移除 VAP token（从后面移除） ===
-
-        if self.vap_remove_layer is not None and self.layer_idx == self.vap_remove_layer and self.T_vap > 0:
-            hidden_states = hidden_states[:, :-self.T_vap, :]
-
-
+            residuals=hidden_states
+            hidden_states = residuals + self.SAA(hidden_states)
         return hidden_states
+
+
 
 
 # Copied from transformers.models.qwen2.modeling_qwen2.Qwen2RMSNorm
