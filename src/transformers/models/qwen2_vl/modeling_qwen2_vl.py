@@ -492,19 +492,19 @@ class Qwen2VLVisionBlock(nn.Module):
                 )
         
         config.VAP_layers = [0] 
-
-        config.VAP_tokens=32
         config.VAP_heads=4
+        self.T_vap=32
+        self.vap_remove_layer=31
+
         self.VAP = (
             VAP(
                 vit_dim=config.embed_dim,
-                num_query_tokens=config.VAP_tokens,
+                num_query_tokens=self.T_vap,
                 num_heads=config.VAP_heads,
             )
             if layer_idx in config.VAP_layers else None
         )
 
-        self.T_vap = 0
         self.vap_remove_layer=31
 
 
@@ -519,7 +519,7 @@ class Qwen2VLVisionBlock(nn.Module):
         if self.VAP is not None:
             vap_tokens = self.VAP(hidden_states)  # [B, T_vap, D]
             hidden_states = torch.cat([hidden_states, vap_tokens], dim=1)
-            self.T_vap = vap_tokens.shape[1]
+
 
         if rotary_pos_emb is not None and self.T_vap > 0:
             rotary_pos_emb = pad_rotary_embedding(rotary_pos_emb, self.T_vap)
