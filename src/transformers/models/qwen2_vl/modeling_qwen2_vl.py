@@ -424,6 +424,46 @@ class SAA(nn.Module):
 
 
 
+# class Qwen2VLVisionBlock(nn.Module):
+#     def __init__(self, config, attn_implementation: str = "sdpa", layer_idx: int = -1) -> None:
+#         super().__init__()
+#         self.norm1 = LayerNorm(config.embed_dim, eps=1e-6)
+#         self.norm2 = LayerNorm(config.embed_dim, eps=1e-6)
+#         mlp_hidden_dim = int(config.embed_dim * config.mlp_ratio)
+
+#         self.attn = QWEN2_VL_VISION_ATTENTION_CLASSES[attn_implementation](
+#             config.embed_dim, num_heads=config.num_heads
+#         )
+#         self.mlp = VisionMlp(dim=config.embed_dim, hidden_dim=mlp_hidden_dim, hidden_act=config.hidden_act)
+
+#         self.SAA_layers = [31] 
+#         # self.SAA_layers = [7,15,23,31] 
+#         self.SAA = (
+#                     SAA(config.embed_dim)
+#                     if layer_idx in self.SAA_layers else None
+#                 )
+
+#     def forward(
+#         self,
+#         hidden_states: torch.Tensor,
+#         cu_seqlens: torch.Tensor,
+#         rotary_pos_emb: Optional[torch.Tensor] = None,
+#         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+#     ) -> torch.Tensor:
+#         hidden_states = hidden_states + self.attn(
+#             self.norm1(hidden_states),
+#             cu_seqlens=cu_seqlens,
+#             rotary_pos_emb=rotary_pos_emb,
+#             position_embeddings=position_embeddings,
+#         )
+#         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
+
+#         if self.SAA is not None:
+#             residuals=hidden_states
+#             hidden_states = residuals + self.SAA(hidden_states)
+#         return hidden_states
+
+
 class Qwen2VLVisionBlock(nn.Module):
     def __init__(self, config, attn_implementation: str = "sdpa", layer_idx: int = -1) -> None:
         super().__init__()
@@ -436,12 +476,6 @@ class Qwen2VLVisionBlock(nn.Module):
         )
         self.mlp = VisionMlp(dim=config.embed_dim, hidden_dim=mlp_hidden_dim, hidden_act=config.hidden_act)
 
-        self.SAA_layers = [31] 
-        # self.SAA_layers = [7,15,23,31] 
-        self.SAA = (
-                    SAA(config.embed_dim)
-                    if layer_idx in self.SAA_layers else None
-                )
 
     def forward(
         self,
@@ -457,12 +491,7 @@ class Qwen2VLVisionBlock(nn.Module):
             position_embeddings=position_embeddings,
         )
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
-
-        if self.SAA is not None:
-            residuals=hidden_states
-            hidden_states = residuals + self.SAA(hidden_states)
         return hidden_states
-
 
 
 
